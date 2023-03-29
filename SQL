@@ -1,46 +1,141 @@
-import pyodbc
-import csv
-import pandas as pd
-import re
+DECLARE @Table_Catalog NVARCHAR(50) = 'database'; 
+DECLARE @Table_Schema NVARCHAR(50) = 'dbo'; 
+DECLARE @Table_Name NVARCHAR(50) = 'table_name';
+DECLARE @DistinctMax INT = 150;
 
-# Set up a connection to your SQL Server
-server =  server_name
-database = db_name
+DECLARE @RowCnt BIGINT = 0;
 
-cnxn = pyodbc.connect('DRIVER={SQL Server};SERVER='+server+';DATABASE='+database+';Trusted_Connection=yes;, timeout')
+DECLARE @ColumnNameId INT = 1;
+DECLARE @ColumnName VARCHAR(MAX) = '';
 
-# Set up a cursor to execute SQL queries
-cursor = cnxn.cursor()
+DECLARE @DistinctCount INT; 
+DECLARE @IsDate BIT = 0;
 
-# Define file paths
-query_file = query_directory
-output_file = output_directory
+DECLARE @SQL AS NVARCHAR(MAX) = ''; 
 
-# Read the SQL query from the text file
-with open(query_file, 'r') as f:
-    queries = f.read()
+ DROP TABLE IF EXISTS #ProfileData;
+ CREATE TABLE #ProfileData
+ (
+  ColumnNameId INT,
+  TableCatalog NVARCHAR(128),
+  TableSchema NVARCHAR(128),
+  TableName NVARCHAR(128),
+  ColumnName NVARCHAR(128),
+ );
 
-# Execute the query
+ DROP TABLE IF EXISTS #ProfileData_DomainsOnly;
+ CREATE TABLE #ProfileData_DomainsOnly
+ (
+  ColumnNameId INT,
+  DomainName NVARCHAR(128),
+  [Count] INT,
+  PercentTotal DECIMAL(5,4),
+  NumberOfNulls NVARCHAR(128),
+  NumberOfEntries NVARCHAR(128),
+  UniquenessIndicator NVARCHAR(MAX)
+ );
 
-try: 
-    cursor.execute(queries)
-    print('\n' + ' SQL Queries Executed Sucessfully')
-except pyodbc.Error as ex:
-    print(f'\nError executing query: {queries}')
-    print(f'\nError: {ex}')
 
-# Fetch the results
-results = cursor.fetchall()
+INSERT INTO #ProfileData (ColumnNameId, TableCatalog, TableSchema, TableName, ColumnName)
+SELECT ORDINAL_POSITION AS 'ColumnNameId', TABLE_CATALOG AS 'TableCatalog', TABLE_SCHEMA AS 'TableSchema', TABLE_NAME AS 'TableName', COLUMN_NAME AS 'ColumnName' 
+from INFORMATION_SCHEMA.COLUMNS
+where TABLE_CATALOG = @Table_Catalog AND TABLE_SCHEMA = @Table_Schema AND TABLE_NAME = @Table_Name; 
 
-# Get the column names
-columns = [column[0] for column in cursor.description]
+SELECT @RowCnt = COUNT(0) FROM #ProfileData;
 
-# Create a DataFrame from the results and column names
-df = pd.DataFrame.from_records(results, columns=columns)
+WHILE @ColumnNameId <= 235
 
-# Export the result to a CSV file
-df.to_csv(output_file, index=False)
+BEGIN
+   SET @ColumnName = (SELECT ColumnName FROM #ProfileData WHERE ColumnNameId = @ColumnNameId)
 
-# Close the cursor and connection
-cursor.close()
-cnxn.close()
+   SET @SQL =
+   'SELECT @IsDate = 
+    CASE 
+		WHEN SUM(CASE WHEN [' + @ColumnName + '] IS NULL THEN 1 ELSE 0 END) = COUNT(*) THEN 0 
+		WHEN SUM(ISDATE(CAST([' + @ColumnName + '] AS NVARCHAR))) = COUNT([' + @ColumnName + ']) THEN 1 
+		ELSE 0 
+		END  
+    FROM [' + @Table_Catalog + '].[' + @Table_Schema + '].[' + @Table_Name + ']'
+
+	
+		EXEC sp_executesql @SQL, N'@IsDate BIT OUTPUT', @IsDate OUTPUT
+
+   SET @SQL =
+   'SELECT @DistinctCount = COUNT(DISTINCT [' + @ColumnName + '] ) FROM [' + @Table_Catalog + '].[' + @Table_Schema + '].[' + @Table_Name + ']'
+   
+   EXEC sp_executesql @SQL, N'@DistinctCount int OUTPUT', @DistinctCount OUTPUT
+
+   IF (@IsDate = 1)
+	   BEGIN 
+	 
+	   SET @SQL = 
+	   'INSERT INTO #ProfileData_DomainsOnly (ColumnNameId, DomainName, [Count], PercentTotal, NumberOfNulls, NumberOfEntries, UniquenessIndicator)
+	   SELECT @ColumnNameId, 
+	   year(try_parse(CAST([' + @ColumnName + '] AS NVARCHAR) as date using ''en-US'')), 
+	   COUNT(*) AS "Count",
+	   CAST(count(*) AS FLOAT) / CAST(sum(count(*)) over() AS FLOAT) AS "PercentTotal",
+	   CASE WHEN year(try_parse(CAST([' + @ColumnName + '] AS NVARCHAR) as date using ''en-US'')) IS NULL THEN CAST(SUM(CASE WHEN year(try_parse(CAST([' + @ColumnName + '] AS NVARCHAR) as date using ''en-US'')) IS NULL THEN 1 ELSE 0 END) AS VARCHAR)
+	   ELSE ''''
+	   END AS "NumberOfNulls",
+	   '''' AS "NumberOfEntries",
+	   '''' AS "UniquenessIndicator"
+	   FROM [' + @Table_Catalog + '].[' + @Table_Schema + '].[' + @Table_Name + ']
+	   GROUP BY year(try_parse(CAST([' + @ColumnName + '] AS NVARCHAR) as date using ''en-US''))'
+
+	   EXEC sp_executesql @SQL, N'@ColumnNameId INT', @ColumnNameId = @ColumnNameId
+
+	   END
+
+
+   ELSE 
+		IF (@DistinctCount < 50)
+			   BEGIN
+			   PRINT CONCAT ('DistinctCount: ' , @DistinctCount);
+			   SET @SQL = 
+			   'INSERT INTO #ProfileData_DomainsOnly (ColumnNameId, DomainName, [Count], PercentTotal, NumberOfNulls, NumberOfEntries, UniquenessIndicator)
+			   SELECT 
+					@ColumnNameId, 
+					[' + @ColumnName +'], COUNT(*) AS "Count", 
+					CAST(count(*) AS FLOAT) / CAST(sum(count(*)) over() AS FLOAT) AS "% Total",
+					CASE WHEN [' + @ColumnName +'] IS NULL THEN CAST(SUM(CASE WHEN [' + @ColumnName +'] IS NULL THEN 1 ELSE 0 END) AS VARCHAR)
+						 ELSE ''''
+					     END AS "NumberOfNulls",
+					'''' AS "NumberOfEntries",
+					'' '' AS UniquenessIndicator
+			   FROM [' + @Table_Catalog + '].[' + @Table_Schema + '].[' + @Table_Name + ']
+			   GROUP BY [' + @ColumnName + ']'
+
+			   EXEC sp_executesql @SQL, N'@ColumnNameId INT', @ColumnNameId = @ColumnNameId
+
+			   END
+
+		ELSE
+			   BEGIN
+
+			   SET @SQL = 
+			   'INSERT INTO #ProfileData_DomainsOnly (ColumnNameId, DomainName, [Count], PercentTotal, NumberOfNulls, NumberOfEntries, UniquenessIndicator)
+			   SELECT 
+				   @ColumnNameId,
+				   ''MANY'', 
+				   COUNT([' + @ColumnName +']) AS "Count", 1 AS "% Total",
+				   SUM(CASE WHEN [' + @ColumnName +'] IS NULL THEN 1 ELSE 0 END) "NumberOfNulls",
+			       COUNT([' + @ColumnName +']) "NumberOfEntries", 
+				   CASE
+					WHEN COUNT([' + @ColumnName +']) <> COUNT(DISTINCT[' + @ColumnName +']) THEN ''Entries are not UNIQUE''
+					WHEN COUNT([' + @ColumnName +']) = COUNT(DISTINCT[' + @ColumnName +']) THEN ''Entries are UNIQUE''
+					END AS UniquenessIndicator
+			   FROM [' + @Table_Catalog + '].[' + @Table_Schema + '].[' + @Table_Name + ']'
+
+			   EXEC sp_executesql @SQL, N'@ColumnNameId INT', @ColumnNameId = @ColumnNameId
+
+			   END
+
+   SET @ColumnNameId = @ColumnNameId + 1 
+
+END; 
+
+SELECT PD.ColumnNameId, PD.TableCatalog, PD.TableSchema, PD.TableName, PD.ColumnName, PDDO.DomainName, PDDO.[Count], PDDO.PercentTotal, PDDO.NumberOfNulls, PDDO.NumberOfEntries, PDDO.UniquenessIndicator
+FROM #ProfileData_DomainsOnly PDDO 
+INNER JOIN #ProfileData PD
+ON PDDO.ColumnNameId = PD.ColumnNameID
+ORDER BY PD.ColumnNameID, TRY_PARSE(PDDO.DomainName AS DECIMAL(10, 2)), PDDO.DomainName
