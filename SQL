@@ -1,0 +1,46 @@
+import pyodbc
+import csv
+import pandas as pd
+import re
+
+# Set up a connection to your SQL Server
+server =  server_name
+database = db_name
+
+cnxn = pyodbc.connect('DRIVER={SQL Server};SERVER='+server+';DATABASE='+database+';Trusted_Connection=yes;, timeout')
+
+# Set up a cursor to execute SQL queries
+cursor = cnxn.cursor()
+
+# Define file paths
+query_file = query_directory
+output_file = output_directory
+
+# Read the SQL query from the text file
+with open(query_file, 'r') as f:
+    queries = f.read()
+
+# Execute the query
+
+try: 
+    cursor.execute(queries)
+    print('\n' + ' SQL Queries Executed Sucessfully')
+except pyodbc.Error as ex:
+    print(f'\nError executing query: {queries}')
+    print(f'\nError: {ex}')
+
+# Fetch the results
+results = cursor.fetchall()
+
+# Get the column names
+columns = [column[0] for column in cursor.description]
+
+# Create a DataFrame from the results and column names
+df = pd.DataFrame.from_records(results, columns=columns)
+
+# Export the result to a CSV file
+df.to_csv(output_file, index=False)
+
+# Close the cursor and connection
+cursor.close()
+cnxn.close()
